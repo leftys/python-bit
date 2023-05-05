@@ -15,34 +15,40 @@ class ReconnectingWebsocket:
     MIN_RECONNECT_WAIT = 0.1
     TIMEOUT = 30
 
-    def __init__(self, loop, path, coro, prefix=''):
+    def __init__(self, loop, path, coro, prefix='', reconnect_auth_coro = None):
+        async def empty_coro():
+            pass
+
         self._loop = loop
         self._log = logging.getLogger(__name__)
         self._path = path
         self._coro = coro
         self._prefix = prefix
+        self._reconnect_auth_coro = reconnect_auth_coro or empty_coro
         self._reconnects = 0
         self._conn = None
-        self._ping_loop = None
         self._socket = None
+        self.connected = asyncio.Event()
 
         self._connect()
 
     def _connect(self):
         self._conn = asyncio.ensure_future(self._run(), loop=self._loop)
-        self._ping_loop = asyncio.ensure_future(self._run_ping_loop(), loop=self._loop)
         self._conn.add_done_callback(self._handle_conn_done)
 
+    async def start(self):
+        await self.connected.wait()
+
     async def _run(self):
-        keep_waiting = True
         ws_url = self.STREAM_URL + self._prefix + self._path
         async with ws.connect(ws_url) as socket:
             self._socket = socket
             self._reconnects = 0
             self._messages_in_a_row = 0
+            self.connected.set()
 
             try:
-                while keep_waiting:
+                while self.connected.is_set():
                     queue_len = len(self._socket.messages)
                     if queue_len == 0:
                         self._messages_in_a_row = 0
@@ -66,31 +72,17 @@ class ReconnectingWebsocket:
                         await asyncio.sleep(0)
             except ws.ConnectionClosed as e:
                 self._log.info('ws connection closed: %r', e)
-                await self._reconnect()
+                asyncio.create_task(self._reconnect())
             except asyncio.CancelledError:
                 self._log.debug('ws connection cancelled')
                 raise
             except Exception as e:
                 self._log.warning('ws exception: %r', e)
-                await self._reconnect()
-
-    async def _run_ping_loop(self):
-        await asyncio.sleep(self.TIMEOUT)
-        while self._socket is not None:
-            try:
-                await self.send_ping()
-            except ws.ConnectionClosed as ex:
-                if self._socket is None and ex.code == 1000:
-                    # Connection closed successfully
-                    return
-            except asyncio.CancelledError:
-                raise
-            except Exception as ex:
-                if self._socket is not None:
-                    self._log.error('Websocket ping failed')
-            await asyncio.sleep(self.TIMEOUT)
+                asyncio.create_task(self._reconnect())
+        self.connected.clear()
 
     def _handle_conn_done(self, task: asyncio.Task):
+        self.connected.clear()
         try:
             task.result()
         except asyncio.CancelledError:
@@ -100,7 +92,7 @@ class ReconnectingWebsocket:
 
     def _get_reconnect_wait(self, attempts: int) -> int:
         expo = 2 ** attempts
-        return round(random() * min(self.MAX_RECONNECT_SECONDS, expo - 1) + 1)
+        return round(random() * min(self.MAX_RECONNECT_SECONDS, expo - 1))
 
     async def _reconnect(self):
         await self.cancel()
@@ -113,8 +105,17 @@ class ReconnectingWebsocket:
             reconnect_wait = self._get_reconnect_wait(self._reconnects)
             await asyncio.sleep(reconnect_wait)
             self._connect()
+            await self.connected.wait()
+            await self._reconnect_auth_coro()
         else:
             self._log.error('Max reconnections {} reached:'.format(self.MAX_RECONNECTS))
+
+    async def send(self, data):
+        if not self.connected.is_set():
+            self._log.warning('Trying to send data on closed socket')
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self.connected.wait(), timeout = 10)
+        await self._socket.send(data)
 
     async def send_ping(self):
         if self._socket:
@@ -123,13 +124,9 @@ class ReconnectingWebsocket:
     async def cancel(self):
         if self._conn:
             self._log.debug('Cancelling conn')
+            self.connected.clear()
             self._conn.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._conn
         self._socket = None
-        if self._ping_loop:
-            self._log.debug('Cancelling ping loop')
-            self._ping_loop.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._ping_loop
         self._log.debug('Done')

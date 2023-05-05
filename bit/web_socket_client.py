@@ -24,7 +24,7 @@ class WebSocketClient:
             path='',
             coro=self.on_message,
             # TODO port reconnecting logic from python-ascendex version
-            # reconnect_auth_coro = self._on_reconnect,
+            reconnect_auth_coro = self._on_reconnect,
         )
         self.subscribers = {}
         self.intervals = {}
@@ -79,9 +79,6 @@ class WebSocketClient:
         for channel, ids in self.subscribers.items():
             # Assume all intervals are same for all ids/pairs in channel
             await self._send_subscribe(ids, [channel], self.intervals[channel][ids[0]])
-
-    # @staticmethod
-    # def _get_subscribe_message(channel, symbols, unsubscribe=False):
 
     async def _send_subscribe(self, symbols, channels, interval, unsubscribe=False):
         # if self.ws.connected.is_set():
