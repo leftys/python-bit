@@ -7,9 +7,8 @@ import websockets as ws
 
 
 class ReconnectingWebsocket:
-
-    # STREAM_URL = "wss://ws.bit.com"
-    STREAM_URL = "wss://betaws.bitexch.dev"
+    STREAM_URL = "wss://spot-ws.bit.com"
+    # STREAM_URL = "wss://betaws.bitexch.dev"
     MAX_RECONNECTS = 5
     MAX_RECONNECT_SECONDS = 60
     MIN_RECONNECT_WAIT = 0.1
@@ -43,7 +42,6 @@ class ReconnectingWebsocket:
         ws_url = self.STREAM_URL + self._prefix + self._path
         async with ws.connect(ws_url) as socket:
             self._socket = socket
-            self._reconnects = 0
             self._messages_in_a_row = 0
             self.connected.set()
 
@@ -77,7 +75,7 @@ class ReconnectingWebsocket:
                 self._log.debug('ws connection cancelled')
                 raise
             except Exception as e:
-                self._log.warning('ws exception: %r', e)
+                self._log.exception('ws exception')
                 asyncio.create_task(self._reconnect())
         self.connected.clear()
 
@@ -129,4 +127,5 @@ class ReconnectingWebsocket:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._conn
         self._socket = None
+        self._reconnects = 0
         self._log.debug('Done')

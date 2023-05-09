@@ -1,22 +1,15 @@
 class BitAPIException(Exception):
-    """Exception class to handle general API Exceptions
-
-    `code` values
-
-    `message` format
-
-    """
-
-    def __init__(self, uri, params, response, data):
+    def __init__(self, uri, params, response, code, message):
         self.uri = uri
         self.params = params
         self.response = response
-        self.data = data
+        self.code = code
+        self.message = message
 
     def __str__(self):  # pragma: no cover
-        return "BitAPIException {}?{}: {}".format(self.uri, self.params, self.data)
+        return "BitAPIException on {}: {} {}".format(self.uri, self.code, self.message)
 
 
 class SubscribeException(BitAPIException):
     def __init__(self, code, message):
-        super().__init__('websocket', '', code, message)
+        super().__init__('websocket', '', None, code, message)

@@ -12,7 +12,7 @@ import websockets.exceptions
 from bit.util import *
 from bit.reconnecting_websocket import ReconnectingWebsocket
 from bit.exceptions import BitAPIException, SubscribeException
-from bit.rest_client import BitClient
+from bit.rest_client import RestClient
 
 
 
@@ -39,9 +39,9 @@ class WebSocketClient:
     #     return int(tm * 1e3)
 
     async def _get_ws_token(self):
-        restClient = BitClient(self.key, self.secret)
+        restClient = RestClient(self.key, self.secret)
         ret = await restClient.spot_ws_auth()
-        return ret["data"]["token"]
+        return ret["token"]
 
     # def make_user_trade_req(token):
     #     return {
@@ -74,21 +74,26 @@ class WebSocketClient:
     #     }
 
     async def _on_reconnect(self):
+        # print('Reconnceting')
         await self.start()
         # Resubscribe
         for channel, ids in self.subscribers.items():
             # Assume all intervals are same for all ids/pairs in channel
+            ids = list(ids)
             await self._send_subscribe(ids, [channel], self.intervals[channel][ids[0]])
 
     async def _send_subscribe(self, symbols, channels, interval, unsubscribe=False):
         # if self.ws.connected.is_set():
         msg_type = "unsubscribe" if unsubscribe else "subscribe"
+        assert self._token
         msg = {
             "type": msg_type,
             "channels": channels,
             "token": self._token,
         }
-        if symbols:
+        # if len(channels) == 1 and channels[0] in ('depth', 'trade'):
+        #     del msg['token']
+        if symbols and symbols != ['']:
             msg["pairs"] = symbols
         if interval:
             msg["interval"] = interval
@@ -106,10 +111,11 @@ class WebSocketClient:
             pairs = ['']
         for ch in channels:
             channel_data = self.subscribers.setdefault(ch, dict())
+            interval_data = self.intervals.setdefault(ch, dict())
             for p in pairs:
                 subscribers = channel_data.setdefault(p, set())
                 subscribers.add(coro)
-                self.intervals[ch][p] = interval
+                interval_data[p] = interval
         await self._send_subscribe(pairs, channels, interval)
 
     async def unsubscribe(self, channel, id_):
@@ -122,11 +128,11 @@ class WebSocketClient:
             del self.subscribers[channel]
             del self.intervals[channel]
 
-    async def ping(self):
-        """ping pong to keep connection live"""
-        # if self.ws.connected.is_set():
-        msg = ujson.dumps({"type": "ping"})
-        await self.ws.send(msg)
+    # async def ping(self):
+    #     """ping pong to keep connection live"""
+    #     # if self.ws.connected.is_set():
+    #     msg = ujson.dumps({"type": "ping"})
+    #     await self.ws.send(msg)
 
     async def on_message(self, message):
         """
@@ -147,9 +153,22 @@ class WebSocketClient:
 
         if "data" in message:
             data = message["data"]
+            if 'timestamp' in message and type(data) == dict:
+                data['timestamp'] = message['timestamp']
 
             if 'pair' in data:
                 pair = data['pair']
+            elif type(data) == list:
+                for submessage in data:
+                    pair = submessage['pair']
+                    try:
+                        subscribers = self.subscribers[topic][pair]
+                    except KeyError:
+                        logging.info(f'no subscribers for submessage {message}')
+                    else:
+                        for subscriber in subscribers:
+                            await subscriber(topic, pair, data)
+                        return
             else:
                 pair = ''
             try:
@@ -163,8 +182,11 @@ class WebSocketClient:
             logging.warning(f"unhandled message {message}")
 
     async def start(self):
+        await self.ws.connected.wait()
         self._token = await self._get_ws_token()
 
     async def close(self):
         # TODO more graceful cancel
         await self.ws.cancel()
+        self.subscribers.clear()
+        self.intervals.clear()
